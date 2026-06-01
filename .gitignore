@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Environment
+backend/.env
+.env
+
+# Large data files
+LOGISTIC_ACTIVITIES.csv
+backend/data/LOGISTIC_ACTIVITIES.csv
+
+# IDE
+.vscode/
+.idea/
