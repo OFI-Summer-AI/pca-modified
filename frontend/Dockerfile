@@ -10,13 +10,12 @@ RUN npm run build
 FROM nginx:alpine
 
 COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy as a plain template file — NOT into /etc/nginx/templates/
-# (that directory triggers nginx's built-in envsubst which replaces ALL $ tokens)
 COPY nginx.conf /etc/nginx/conf.d/default.conf.template
-
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
+
+# Remove the default nginx config so only ours is used
+RUN rm -f /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
