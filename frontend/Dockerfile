@@ -6,12 +6,14 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Stage 2 — serve with nginx + proxy to backend
+# Stage 2 — serve with nginx
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Place config in templates/ so nginx uses envsubst to inject BACKEND_URL at runtime
-COPY nginx.conf /etc/nginx/templates/default.conf.template
+# Copy as a plain template — NOT into /etc/nginx/templates/ (that runs envsubst on ALL vars)
+COPY nginx.conf /etc/nginx/conf.d/default.conf.template
 
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+
+# Only substitute ${BACKEND_URL} and ${PORT} — nginx's own $uri, $proxy_host etc. are left untouched
+CMD ["/bin/sh", "-c", "export PORT=${PORT:-80} && envsubst '${BACKEND_URL} ${PORT}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
