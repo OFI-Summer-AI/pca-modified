@@ -164,27 +164,43 @@ async def analyze(
     return JSONResponse(content=output)
 
 
+def _load_df_from_postgres() -> "pd.DataFrame":
+    """Load logistic_activities table from PostgreSQL into a DataFrame."""
+    import pandas as pd
+    from sqlalchemy import create_engine
+    db_url = os.getenv("DATABASE_URL", "")
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        df = pd.read_sql('SELECT * FROM logistic_activities', conn)
+    return df
+
+
 @app.get("/analyze-default")
 async def analyze_default():
-    name_a = os.getenv("DEFAULT_TABLE_A", "")
-    if not name_a:
-        raise HTTPException(status_code=404, detail="DEFAULT_TABLE_A not set in .env")
-    path_a = DATA_DIR / name_a
-    if not path_a.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: backend/data/{name_a}")
+    db_url = os.getenv("DATABASE_URL", "")
 
     try:
-        bytes_a = path_a.read_bytes()
-        df = parse_file(bytes_a, name_a)
-        name_b = os.getenv("DEFAULT_TABLE_B", "")
-        if name_b:
-            path_b = DATA_DIR / name_b
-            if path_b.exists():
-                df_b = parse_file(path_b.read_bytes(), name_b)
-                from pandas import concat
-                df = concat([df, df_b], ignore_index=True).drop_duplicates()
+        if db_url:
+            df = _load_df_from_postgres()
+        else:
+            name_a = os.getenv("DEFAULT_TABLE_A", "")
+            if not name_a:
+                raise HTTPException(status_code=404, detail="No DATABASE_URL or DEFAULT_TABLE_A set")
+            path_a = DATA_DIR / name_a
+            if not path_a.exists():
+                raise HTTPException(status_code=404, detail=f"File not found: backend/data/{name_a}")
+            df = parse_file(path_a.read_bytes(), name_a)
+            name_b = os.getenv("DEFAULT_TABLE_B", "")
+            if name_b:
+                path_b = DATA_DIR / name_b
+                if path_b.exists():
+                    import pandas as pd
+                    df_b = parse_file(path_b.read_bytes(), name_b)
+                    df = pd.concat([df, df_b], ignore_index=True).drop_duplicates()
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"File parsing error: {exc}")
+        raise HTTPException(status_code=400, detail=f"Data loading error: {exc}")
 
     try:
         output, session_data = _run_pipeline(df)
@@ -202,6 +218,12 @@ async def analyze_default():
 
 @app.get("/default-files")
 async def default_files():
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url:
+        return {
+            "table_a": {"name": "logistic_activities (PostgreSQL)", "exists": True},
+            "table_b": {"name": "", "exists": False},
+        }
     name_a = os.getenv("DEFAULT_TABLE_A", "")
     name_b = os.getenv("DEFAULT_TABLE_B", "")
     return {
