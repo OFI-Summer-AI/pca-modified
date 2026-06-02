@@ -51,6 +51,16 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/upload-file")
+async def upload_file(file: UploadFile = File(...)):
+    """Temporary endpoint to upload CSV to /app/data volume. Remove after use."""
+    dest = DATA_DIR / file.filename
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"status": "ok", "saved_to": str(dest), "size_bytes": len(content)}
+
+
 def _run_pipeline(df) -> tuple[dict, dict]:
     """Run the full analysis pipeline. Returns (output_json, session_data)."""
     import logging
