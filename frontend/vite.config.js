@@ -15,6 +15,8 @@ export default defineConfig({
       '/orders': 'http://localhost:8001',
       '/send-alerts': 'http://localhost:8001',
       '/health': 'http://localhost:8001',
+      '/compliance': 'http://localhost:8001',
+      '/insights': 'http://localhost:8001',
     },
   },
 });

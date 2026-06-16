@@ -6,7 +6,7 @@ import { useApp } from '../../context/AppContext.jsx';
 
 const PAGE_SIZE = 10;
 
-export default function InsightsTable({ orders, label }) {
+export default function InsightsTable({ orders, label, action }) {
   const { dispatch } = useApp();
   const [page, setPage] = useState(0);
 
@@ -37,27 +37,30 @@ export default function InsightsTable({ orders, label }) {
           <span className="section-title">{label || 'Top Risk Orders'}</span>
           <span className="section-count">{orders.length}</span>
         </div>
-        {totalPages > 1 && (
-          <div className="pagination">
-            <button
-              className="page-btn"
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              disabled={page === 0}
-            >
-              ‹ Prev
-            </button>
-            <span className="page-info">
-              {page + 1} / {totalPages}
-            </span>
-            <button
-              className="page-btn"
-              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-              disabled={page === totalPages - 1}
-            >
-              Next ›
-            </button>
-          </div>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {action}
+          {totalPages > 1 && (
+            <div className="pagination">
+              <button
+                className="page-btn"
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+              >
+                ‹ Prev
+              </button>
+              <span className="page-info">
+                {page + 1} / {totalPages}
+              </span>
+              <button
+                className="page-btn"
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page === totalPages - 1}
+              >
+                Next ›
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <table>

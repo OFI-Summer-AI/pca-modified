@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from datetime import date as _date
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -23,7 +24,10 @@ from chatbot.gemini_chat import (ask_with_data, ask_about_order, ask_open,
 from chatbot.intent_classifier import classify, extract_order_id
 from chatbot.pandas_queries import run_query
 from pipeline.deviation_engine import run_all_orders
-from pipeline.email_service import send_alerts_for_blocked
+from pipeline.email_service import (
+    send_alerts_for_blocked, build_group_alert, send_group_alert,
+    build_context_alert, send_context_alert,
+)
 from pipeline.executive_summary import generate_summary
 from pipeline.flow_builder import build_step_frequencies, get_top_sequences
 from pipeline.flow_inferrer import infer_flow
@@ -337,6 +341,10 @@ async def get_orders(
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    deviation_type: Optional[str] = None,
+    source_location: Optional[str] = None,
+    group_key: Optional[str] = None,
+    order_ids: list[str] = Query(default=[]),
 ):
     """Paginated, filtered order list. Replaces sending all orders in /analyze."""
     session_data = store.get(session_id)
@@ -349,7 +357,24 @@ async def get_orders(
     if status and status != "ALL":
         orders = [o for o in orders if o.get("Process_Status") == status]
     if risk:
-        orders = [o for o in orders if o.get("Risk_Level") == risk]
+        risk_upper = risk.upper()
+        orders = [o for o in orders if (o.get("Risk_Level") or "").upper() == risk_upper]
+    if deviation_type:
+        def _has_dev(order, dev_type):
+            for d in order.get("Deviations", []):
+                if d.get("type") == dev_type:
+                    return True
+                if d.get("type") == "DOMAIN_RULE_VIOLATION" and d.get("rule_id") == dev_type:
+                    return True
+            return False
+        orders = [o for o in orders if _has_dev(o, deviation_type)]
+    if source_location:
+        sl = source_location.strip().upper()
+        orders = [
+            o for o in orders
+            if str(o.get("metadata", {}).get("CHANGED_FROM") or
+                   o.get("metadata", {}).get("actual_source") or "").strip().upper() == sl
+        ]
     if search:
         q = search.lower()
         orders = [o for o in orders if q in str(o.get("Order_Number", "")).lower()]
@@ -357,6 +382,22 @@ async def get_orders(
         orders = [o for o in orders if (d := _order_date(o)) and d >= date_from]
     if date_to:
         orders = [o for o in orders if (d := _order_date(o)) and d <= date_to]
+    if order_ids:
+        ids_set = {str(i) for i in order_ids}
+        orders = [o for o in orders if str(o.get("Order_Number", "")) in ids_set]
+    elif group_key and deviation_type:
+        def _has_group(order, dev_type, gkey):
+            meta = order.get("metadata", {})
+            for d in order.get("Deviations", []):
+                d_type = d.get("type", "")
+                d_rule = d.get("rule_id", "")
+                effective = d_rule if (d_type == "DOMAIN_RULE_VIOLATION" and d_rule) else d_type
+                if effective == dev_type:
+                    computed_key, _ = _compute_group_key(effective, d, meta)
+                    if computed_key == gkey:
+                        return True
+            return False
+        orders = [o for o in orders if _has_group(o, deviation_type, group_key)]
 
     total = len(orders)
     limit = min(max(1, limit), 500)  # cap at 500 per page
@@ -470,3 +511,301 @@ async def send_alerts_endpoint(payload: AlertPayload):
     loop = asyncio.get_event_loop()
     sent = await loop.run_in_executor(None, send_alerts_for_blocked, payload.orders)
     return {"sent": sent, "count": len(sent)}
+
+
+# ── Compliance / Action Center endpoints ──────────────────────────────────────
+
+def _compute_group_key(deviation_type: str, deviation: dict, meta: dict):
+    """Return (key, extra_fields) for a deviation within the Action Center grouping."""
+    from datetime import datetime as _dt
+    _NULL = {"NONE", "NAN", "NULL", "N/A", ""}  # uppercase — _clean() always uppercases
+
+    def _clean(v): return str(v or "").strip().upper()
+
+    if deviation_type == "WRONG_SOURCE":
+        actual = _clean(meta.get("CHANGED_FROM") or meta.get("actual_source")) or "UNKNOWN"
+        optimal = _clean(meta.get("OPTIMAL_SOURCE_LOCATION") or meta.get("optimal_source"))
+        if optimal in _NULL or optimal == actual:
+            optimal = ""
+        key = f"{actual} → {optimal}" if optimal else actual
+        return key, {"actual_source": actual, "optimal_source": optimal or None}
+
+    if deviation_type == "PLANT_MISMATCH":
+        actual = _clean(meta.get("WERKS")) or "UNKNOWN"
+        required = _clean(meta.get("ALL_PRODUCTION_PLANT"))
+        if required in _NULL or required == actual:
+            required = ""
+        key = f"{actual} → {required}" if required else actual
+        return key, {"actual_plant": actual, "required_plant": required or None}
+
+    if deviation_type == "DELAYED":
+        try:
+            a = _dt.fromisoformat(str(meta.get("WADAT_IST") or meta.get("actual_date") or "")[:10])
+            s = _dt.fromisoformat(str(meta.get("EINDT") or meta.get("scheduled_date") or "")[:10])
+            days = (a - s).days
+            if days <= 0:   key = "Same day or early"
+            elif days <= 7: key = "1–7 days late"
+            elif days <= 30: key = "8–30 days late"
+            elif days <= 90: key = "31–90 days late"
+            else:           key = "90+ days late"
+        except Exception:
+            key = "Delay detected"
+        return key, {}
+
+    if deviation_type == "MISSING_CRITICAL_STEP":
+        step = deviation.get("step") or "Unknown step"
+        return step, {"missing_step": step}
+
+    if deviation_type == "OUT_OF_SEQUENCE":
+        steps = deviation.get("steps") or []
+        label = " → ".join(steps[:3]) + ("…" if len(steps) > 3 else "")
+        return label or "Sequence violation", {"steps": steps[:3]}
+
+    if deviation_type == "DUPLICATE_STEP":
+        steps = deviation.get("steps") or []
+        label = ", ".join(steps[:2]) + ("…" if len(steps) > 2 else "")
+        return label or "Duplicate detected", {"steps": steps}
+
+    if deviation_type == "DELAY_FLAG":
+        return "Pre-flagged by source system", {}
+
+    return deviation_type, {}
+
+
+@app.get("/compliance/breakdown")
+async def compliance_breakdown(
+    session_id: str,
+    deviation_types: list[str] = Query(default=[]),
+):
+    """
+    Return grouped breakdown for selected deviation types.
+    Single pass through all orders — fast even for 573K orders.
+    """
+    session_data = store.get(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found or expired.")
+
+    if not deviation_types:
+        return JSONResponse(content={"sections": []})
+
+    orders = session_data.get("orders", [])
+
+    # One pass — accumulate groups for all requested deviation types
+    dt_groups: dict = {dt: {} for dt in deviation_types}
+
+    for o in orders:
+        matched_types: set = set()
+        for d in o.get("Deviations", []):
+            d_type = d.get("type", "")
+            d_rule = d.get("rule_id", "")
+            effective = d_rule if (d_type == "DOMAIN_RULE_VIOLATION" and d_rule) else d_type
+            if effective not in dt_groups or effective in matched_types:
+                continue
+            matched_types.add(effective)
+
+            meta = o.get("metadata", {})
+            key, extra = _compute_group_key(effective, d, meta)
+            groups = dt_groups[effective]
+            if key not in groups:
+                groups[key] = {"key": key, "count": 0, "sample_order_ids": [], **extra}
+            groups[key]["count"] += 1
+            if len(groups[key]["sample_order_ids"]) < 100:
+                groups[key]["sample_order_ids"].append(str(o.get("Order_Number", "")))
+
+    # Build response — sorted groups with percentages
+    sections = []
+    for dev_type in deviation_types:
+        groups_list = sorted(dt_groups[dev_type].values(), key=lambda x: x["count"], reverse=True)
+        type_total = sum(g["count"] for g in groups_list)
+        for g in groups_list:
+            raw_pct = g["count"] / type_total * 100 if type_total else 0
+            g["pct"] = round(raw_pct, 1)
+            # Prevent "0%" display for real non-zero groups
+            if g["count"] > 0 and g["pct"] == 0.0:
+                g["pct_display"] = "< 0.1%"
+            else:
+                g["pct_display"] = f"{g['pct']}%"
+        sections.append({
+            "deviation_type": dev_type,
+            "total_orders":   type_total,
+            "groups":         groups_list,
+        })
+
+    return JSONResponse(content={"sections": sections})
+
+
+@app.get("/compliance/intersect")
+async def compliance_intersect(
+    session_id: str,
+    filters: list[str] = Query(default=[]),   # "DEVIATION_TYPE:group_key"
+):
+    """
+    Return orders matching ALL supplied (deviation_type, group_key) filters.
+    Used by the cross-filter in the Action Center.
+    """
+    session_data = store.get(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found or expired.")
+
+    # Parse filter list
+    filter_list: list[tuple[str, str]] = []
+    for f in filters:
+        if ":" in f:
+            dev_type, group_key = f.split(":", 1)
+            filter_list.append((dev_type.strip(), group_key.strip()))
+
+    if not filter_list:
+        return JSONResponse(content={"count": 0, "sample_ids": []})
+
+    orders = session_data.get("orders", [])
+    matched_ids: list[str] = []
+
+    for o in orders:
+        meta  = o.get("metadata", {})
+        devs  = o.get("Deviations", [])
+
+        # Build set of (effective_type, group_key) pairs for this order
+        order_groups: set[tuple[str, str]] = set()
+        for d in devs:
+            d_type = d.get("type", "")
+            d_rule = d.get("rule_id", "")
+            effective = d_rule if (d_type == "DOMAIN_RULE_VIOLATION" and d_rule) else d_type
+            key, _ = _compute_group_key(effective, d, meta)
+            order_groups.add((effective, key))
+
+        # Order must satisfy ALL filters
+        if all((ft, fk) in order_groups for ft, fk in filter_list):
+            matched_ids.append(str(o.get("Order_Number", "")))
+
+    return JSONResponse(content={
+        "count":      len(matched_ids),
+        "ids":        matched_ids,
+        "sample_ids": matched_ids[:10],
+    })
+
+
+class GroupAlertPayload(BaseModel):
+    session_id: str
+    deviation_type: str
+    group_key: str
+    group_data: dict = {}
+
+
+@app.get("/compliance/email-preview")
+async def compliance_email_preview(
+    session_id: str,
+    deviation_type: str,
+    group_key: str,
+    group_count: int = 0,
+    group_pct: float = 0.0,
+):
+    """Build and return email template for a compliance group (no sending)."""
+    if not store.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    session_data = store.get(session_id)
+    # Pull real order IDs from the breakdown cache for this group
+    orders = session_data.get("orders", []) if session_data else []
+    sample_ids: list = []
+    for o in orders:
+        if len(sample_ids) >= 100:
+            break
+        for d in o.get("Deviations", []):
+            d_type = d.get("type", "")
+            d_rule = d.get("rule_id", "")
+            effective = d_rule if (d_type == "DOMAIN_RULE_VIOLATION" and d_rule) else d_type
+            if effective == deviation_type:
+                meta = o.get("metadata", {})
+                key, _ = _compute_group_key(effective, d, meta)
+                if key == group_key:
+                    sample_ids.append(str(o.get("Order_Number", "")))
+                    break
+    group = {
+        "key": group_key,
+        "count": group_count,
+        "pct": group_pct,
+        "sample_order_ids": sample_ids,
+    }
+    today = _date.today().strftime("%d %B %Y")
+    subject, html_body, plain_body = build_group_alert(deviation_type, group, today)
+    to_email = os.getenv("ALERT_TO_EMAIL", "")
+    smtp_ok = bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and to_email)
+    return JSONResponse(content={
+        "subject": subject, "html_body": html_body, "body": plain_body,
+        "recipient": to_email if smtp_ok else "",
+        "smtp_configured": smtp_ok,
+    })
+
+
+@app.post("/compliance/send-group-alert")
+async def compliance_send_group_alert(payload: GroupAlertPayload):
+    """Send (or preview) a group compliance alert email."""
+    if not store.get(payload.session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    today = _date.today().strftime("%d %B %Y")
+    result = send_group_alert(payload.deviation_type, payload.group_data, today)
+    return JSONResponse(content=result)
+
+
+# ── Orders-page contextual alert ───────────────────────────────────────────────
+
+@app.get("/compliance/orders-alert-preview")
+async def orders_alert_preview(
+    session_id: str,
+    order_count: int = 0,
+    deviation_type: Optional[str] = None,
+    group_key: Optional[str] = None,
+    filters: list[str] = Query(default=[]),   # "TYPE:key" for intersection
+    status: Optional[str] = None,
+    risk: Optional[str] = None,
+):
+    """Build OFI-branded alert email for whatever filter is active in Orders page."""
+    if not store.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    today    = _date.today().strftime("%d %B %Y")
+    to_email = os.getenv("ALERT_TO_EMAIL", "")
+    smtp_ok  = bool(os.getenv("SMTP_USER") and os.getenv("SMTP_PASS") and to_email)
+
+    subject, html_body, plain_body = build_context_alert(
+        order_count=order_count,
+        today=today,
+        deviation_type=deviation_type,
+        group_key=group_key,
+        intersection_filters=filters or None,
+        status=status,
+        risk=risk,
+    )
+    return JSONResponse(content={
+        "subject": subject,
+        "html_body": html_body,
+        "body": plain_body,
+        "recipient": to_email if smtp_ok else "",
+        "smtp_configured": smtp_ok,
+    })
+
+
+class OrdersAlertSendPayload(BaseModel):
+    session_id: str
+    order_count: int = 0
+    deviation_type: Optional[str] = None
+    group_key: Optional[str] = None
+    intersection_filters: list[str] = []
+    status: Optional[str] = None
+    risk: Optional[str] = None
+
+
+@app.post("/compliance/orders-alert-send")
+async def orders_alert_send(payload: OrdersAlertSendPayload):
+    """Send OFI-branded alert for the current Orders filter context."""
+    if not store.get(payload.session_id):
+        raise HTTPException(status_code=404, detail="Session not found.")
+    today = _date.today().strftime("%d %B %Y")
+    result = send_context_alert(
+        order_count=payload.order_count,
+        today=today,
+        deviation_type=payload.deviation_type,
+        group_key=payload.group_key,
+        intersection_filters=payload.intersection_filters or None,
+        status=payload.status,
+        risk=payload.risk,
+    )
+    return JSONResponse(content=result)

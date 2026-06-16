@@ -5,6 +5,7 @@ import ChartsRow from '../components/dashboard/ChartsRow.jsx';
 import FlowBubbles from '../components/dashboard/FlowBubbles.jsx';
 import TopSequences from '../components/dashboard/TopSequences.jsx';
 import InsightsTable from '../components/dashboard/InsightsTable.jsx';
+import SourceLeaderboard from '../components/dashboard/SourceLeaderboard.jsx';
 
 function ExecSummaryBanner() {
   const { state } = useApp();
@@ -46,23 +47,21 @@ function ClusterInsightsBanner() {
 }
 
 export default function Dashboard() {
-  const { state } = useApp();
-  const { appData, selectedHeatmapRisk, chatOpen } = state;
+  const { state, dispatch } = useApp();
+  const { appData, chatOpen } = state;
 
   if (!appData) return null;
 
-  const insights = appData.insights || [];
-
-  // When heatmap risk is selected, show top orders for that risk level
-  // (pre-computed on the backend — no client-side order iteration needed)
-  const riskTopOrders = appData.riskTopOrders || {};
-  const displayOrders = selectedHeatmapRisk
-    ? (riskTopOrders[selectedHeatmapRisk] || [])
-    : insights;
-
-  const insightLabel = selectedHeatmapRisk
-    ? `Top ${selectedHeatmapRisk} Risk Orders`
-    : 'Top Risk Orders';
+  const displayOrders = appData.insights || [];
+  const insightLabel  = 'Top Risk Orders';
+  const insightAction = (
+    <button
+      className="insight-view-all-btn"
+      onClick={() => dispatch({ type: 'GOTO_ORDERS', status: 'BLOCKED' })}
+    >
+      View all in Orders →
+    </button>
+  );
 
   return (
     <div className={`page${chatOpen ? ' page-chat-open' : ''}`}>
@@ -71,11 +70,17 @@ export default function Dashboard() {
       <KpiRow data={appData} />
       <ChartsRow data={appData} />
       <StatusCards data={appData} />
-      <div className="dash-row-2">
+      {/* Only show 2-col layout when FlowBubbles has actual standard-flow data */}
+      {(appData.flowBubbles?.standard_flow || []).length > 0 ? (
+        <div className="dash-row-2">
+          <TopSequences data={appData} />
+          <FlowBubbles data={appData} />
+        </div>
+      ) : (
         <TopSequences data={appData} />
-        <FlowBubbles data={appData} />
-      </div>
-      <InsightsTable orders={displayOrders} label={insightLabel} />
+      )}
+      <SourceLeaderboard data={appData} />
+      <InsightsTable orders={displayOrders} label={insightLabel} action={insightAction} />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import math
+from collections import defaultdict
 
 
 def _safe(val):
@@ -59,12 +60,82 @@ def format_final_output(orders: list[dict], top_sequences: list = None) -> dict:
         for k, v in by_risk.items()
     }
 
-    # Deviation type counts (for bar chart)
+    # Deviation type counts — unique ORDERS per type (one order counted once per type).
+    # DOMAIN_RULE_VIOLATION is keyed by its rule_id (e.g. "WRONG_SOURCE") for clarity.
     dev_type_counts: dict = {}
     for o in non_pass:
+        seen = set()
         for d in o.get("Deviations", []):
             t = d.get("type", "UNKNOWN")
-            dev_type_counts[t] = dev_type_counts.get(t, 0) + 1
+            if t == "DOMAIN_RULE_VIOLATION" and d.get("rule_id"):
+                t = d["rule_id"]
+            if t not in seen:
+                dev_type_counts[t] = dev_type_counts.get(t, 0) + 1
+                seen.add(t)
+
+    # Source location leaderboard — top locations causing WRONG_SOURCE violations.
+    # actual_source = CHANGED_FROM (what was used), correct_source = OPTIMAL_SOURCE_LOCATION.
+    _NULLISH = {"none", "nan", "null", ""}
+    src_counts: dict = {}          # actual_source → wrong-source order count
+    src_correct: dict = {}         # actual_source → {correct_source: count}  (for majority vote)
+
+    for o in orders:
+        meta = o.get("metadata", {})
+        actual = str(meta.get("CHANGED_FROM") or meta.get("actual_source") or "").strip().upper()
+        if actual.lower() in _NULLISH:
+            continue
+        for d in o.get("Deviations", []):
+            if d.get("type") == "DOMAIN_RULE_VIOLATION" and d.get("rule_id") == "WRONG_SOURCE":
+                src_counts[actual] = src_counts.get(actual, 0) + 1
+                optimal = str(meta.get("OPTIMAL_SOURCE_LOCATION") or meta.get("optimal_source") or "").strip().upper()
+                if optimal.lower() not in _NULLISH and optimal != actual:
+                    src_correct.setdefault(actual, {})
+                    src_correct[actual][optimal] = src_correct[actual].get(optimal, 0) + 1
+                break  # count each order once per source
+
+    total_wrong_source = sum(src_counts.values())
+    source_leaderboard = []
+    for src, cnt in sorted(src_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+        correct_votes = src_correct.get(src, {})
+        correct = max(correct_votes, key=correct_votes.get) if correct_votes else None
+        source_leaderboard.append({
+            "source":         src,
+            "count":          cnt,
+            "pct_of_ws":      round(cnt / total_wrong_source * 100, 1) if total_wrong_source else 0,
+            "pct_of_total":   round(cnt / total * 100, 1) if total else 0,
+            "correct_source": correct,
+        })
+
+    # Trend data — order counts by month (YYYY-MM), compliant vs non-compliant
+    _month_trend: dict = defaultdict(lambda: {"compliant": 0, "non_compliant": 0})
+    for o in orders:
+        meta = o.get("metadata", {})
+        raw = str(meta.get("WADAT_IST") or meta.get("actual_date") or "")
+        month = raw[:7] if len(raw) >= 7 and raw[4:5] == "-" else ""
+        if not month:
+            continue
+        bucket = "compliant" if o.get("Process_Status") == "PASS" else "non_compliant"
+        _month_trend[month][bucket] += 1
+    trend_data = [
+        {"period": m, "compliant": v["compliant"], "non_compliant": v["non_compliant"]}
+        for m, v in sorted(_month_trend.items())
+    ]
+
+    # Heatmap grid — deviation type × risk level order counts
+    _RISK_LEVELS = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    heatmap_grid: dict = {}
+    for o in orders:
+        risk = o.get("Risk_Level", "LOW")
+        seen = set()
+        for d in o.get("Deviations", []):
+            t = d.get("type", "UNKNOWN")
+            if t == "DOMAIN_RULE_VIOLATION" and d.get("rule_id"):
+                t = d["rule_id"]
+            if t not in seen:
+                if t not in heatmap_grid:
+                    heatmap_grid[t] = {r: 0 for r in _RISK_LEVELS}
+                heatmap_grid[t][risk] = heatmap_grid[t].get(risk, 0) + 1
+                seen.add(t)
 
     # FlowBubbles — per-step deviation/pass counts
     standard_flow = orders[0].get("Standard_Flow", []) if orders else []
@@ -124,6 +195,9 @@ def format_final_output(orders: list[dict], top_sequences: list = None) -> dict:
         "deviationTypeCounts": dev_type_counts,
         "topSequences": top_sequences or [],
         "flowBubbles": flow_bubbles,
+        "trendData": trend_data,
+        "heatmapGrid": heatmap_grid,
+        "sourceLeaderboard": source_leaderboard,
         "summary": {
             "total_orders": total,
             "blocked": len(blocked),

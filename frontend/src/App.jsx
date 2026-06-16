@@ -8,6 +8,7 @@ import Upload from './pages/Upload.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Orders from './pages/Orders.jsx';
 import OrderDetail from './pages/OrderDetail.jsx';
+import Compliance from './pages/Compliance.jsx';
 
 function AppShell() {
   const { state } = useApp();
@@ -30,9 +31,10 @@ function AppShell() {
       <Sidebar />
       <div className="main">
         <Topbar />
-        {currentPage === 'dashboard' && <Dashboard />}
-        {currentPage === 'orders' && <Orders />}
-        {currentPage === 'detail' && <OrderDetail />}
+        {currentPage === 'dashboard'   && <Dashboard />}
+        {currentPage === 'orders'      && <Orders />}
+        {currentPage === 'detail'      && <OrderDetail />}
+        {currentPage === 'compliance'  && <Compliance />}
       </div>
       {showAlertModal && <AlertModal />}
       <ChatPanel />

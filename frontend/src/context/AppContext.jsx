@@ -9,6 +9,11 @@ const initialState = {
   detailOrderNum: null,
   statusFilter: 'ALL',
   riskFilter: null,
+  deviationTypeFilter: null,
+  sourceFilter: null,
+  groupKeyFilter: null,
+  intersectionOrderIds: null,
+  intersectionLabels: null,
   dateFrom: '',
   dateTo: '',
   searchQuery: '',
@@ -62,6 +67,37 @@ function reducer(state, action) {
       return { ...state, statusFilter: action.payload };
     case 'SET_RISK_FILTER':
       return { ...state, riskFilter: state.riskFilter === action.payload ? null : action.payload };
+    case 'SET_DEVIATION_FILTER':
+      return {
+        ...state,
+        deviationTypeFilter: action.payload === null
+          ? null
+          : state.deviationTypeFilter === action.payload ? null : action.payload,
+      };
+    case 'SET_SOURCE_FILTER':
+      return {
+        ...state,
+        sourceFilter: action.payload === null
+          ? null
+          : state.sourceFilter === action.payload ? null : action.payload,
+      };
+    // Navigate to Orders page with specific filters pre-applied atomically
+    case 'GOTO_ORDERS':
+      return {
+        ...state,
+        currentPage: 'orders',
+        statusFilter: action.status || 'ALL',
+        riskFilter: action.risk || null,
+        deviationTypeFilter: action.deviationType || null,
+        sourceFilter: action.source || null,
+        groupKeyFilter: action.groupKey || null,
+        intersectionOrderIds: action.orderIds || null,
+        intersectionLabels: action.intersectionLabels || null,
+        searchQuery: '',
+        selectedHeatmapRisk: null,
+        detailOrderNum: null,
+        previousPage: state.currentPage,
+      };
     case 'SET_DATE':
       return { ...state, [action.field]: action.payload };
     case 'CLEAR_DATE':

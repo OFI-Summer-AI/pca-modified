@@ -27,6 +27,12 @@ export default function Sidebar() {
         >
           <span className="icon">◻</span> Orders
         </div>
+        <div
+          className={`nav-item${currentPage === 'compliance' ? ' active' : ''}`}
+          onClick={() => nav('compliance')}
+        >
+          <span className="icon">⚑</span> Action Center
+        </div>
       </nav>
 
       <div className="sidebar-bottom">

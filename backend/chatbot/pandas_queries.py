@@ -6,6 +6,33 @@ import pandas as pd
 
 from .intent_classifier import extract_order_id
 
+
+def _risk_index(raw_score: int, status: str, risk: str) -> int:
+    """
+    Convert raw deviation score → business risk index (0–100).
+    Raw scores use CRITICAL=40, HIGH=25, MEDIUM=10, LOW=5 weights.
+    Business users expect: BLOCKED = very high, LOW = low.
+    """
+    s, r = (status or "").upper(), (risk or "").upper()
+    if s == "BLOCKED" and r == "CRITICAL":
+        return min(90 + (raw_score - 40) // 5, 100)
+    if s == "BLOCKED":
+        return min(75 + max(raw_score - 40, 0) // 4, 89)
+    if s == "ALERT":
+        return min(45 + max(raw_score - 20, 0) // 2, 74)
+    return max(min(raw_score * 2, 39), 5)
+
+
+def _risk_label(status: str, risk: str) -> str:
+    s, r = (status or "").upper(), (risk or "").upper()
+    if s == "BLOCKED" and r == "CRITICAL":
+        return "CRITICAL — Immediate action required"
+    if s == "BLOCKED":
+        return "HIGH RISK — Blocked from process"
+    if s == "ALERT":
+        return "MEDIUM RISK — Under review"
+    return "LOW RISK — Compliant"
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _to_df(orders: list) -> pd.DataFrame:
@@ -74,6 +101,8 @@ def order_lookup(orders: list, question: str) -> dict:
     status    = order.get("Process_Status", "—")
     risk      = order.get("Risk_Level", "—")
     score     = order.get("Deviation_Score", 0)
+    ridx      = _risk_index(score, status, risk)
+    rlabel    = _risk_label(status, risk)
     deviations = order.get("Deviations") or []
     actual_flow = order.get("Actual_Flow") or []
     meta      = order.get("metadata") or {}
@@ -84,7 +113,7 @@ def order_lookup(orders: list, question: str) -> dict:
     optimal_src   = _clean(meta.get("OPTIMAL_SOURCE_LOCATION")) or "—"
 
     # Build answer text
-    lines = [f"**Order {order_id}** — {status} / {risk} risk (score: {score})"]
+    lines = [f"**Order {order_id}** — {rlabel} · Risk Index: {ridx}/100"]
 
     if actual_date != "—":
         lines.append(f"- Actual date: {actual_date}" + (f" | Scheduled: {sched_date}" if sched_date != "—" else ""))
@@ -305,10 +334,19 @@ def ranking_query(orders: list, question: str) -> dict:
         label = "Top 10 highest-risk orders"
 
     cols  = [c for c in ("Order_Number", "Process_Status", "Risk_Level", "Deviation_Score") if c in filtered.columns]
-    table = filtered[cols].rename(columns={
-        "Order_Number": "Order", "Process_Status": "Status",
-        "Risk_Level": "Risk", "Deviation_Score": "Score",
-    }).to_dict("records")
+    rows  = filtered[cols].to_dict("records")
+
+    # Build display table with normalized risk index instead of raw score
+    table = [
+        {
+            "Order":      r.get("Order_Number"),
+            "Status":     r.get("Process_Status"),
+            "Risk":       r.get("Risk_Level"),
+            "Risk Index": f"{_risk_index(r.get('Deviation_Score', 0), r.get('Process_Status', ''), r.get('Risk_Level', ''))}/100",
+            "Assessment": _risk_label(r.get("Process_Status", ""), r.get("Risk_Level", "")),
+        }
+        for r in rows
+    ]
 
     return {"answer": f"**{label}:**", "data": {"table": table, "chart_type": "table"}}
 
